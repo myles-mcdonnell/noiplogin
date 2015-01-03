@@ -2,9 +2,9 @@
 using System.Net;
 using System.Linq;
 using System.Text;
-using System.Collections.Specialized;
 using System.Web;
 using System.IO;
+using System.Threading;
 
 namespace noiplogin
 {
@@ -24,7 +24,7 @@ namespace noiplogin
 			var username = args [0];
 			var password = args [1];
 
-			var request = (HttpWebRequest)HttpWebRequest.Create ("https://www.noip.com/login");
+			var request = (HttpWebRequest)WebRequest.Create ("https://www.noip.com/login");
 
 			request.Method = "GET";
 			request.UserAgent = "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; .NET CLR 1.1.4322; .NET CLR 2.0.50727)";
@@ -38,13 +38,14 @@ namespace noiplogin
 			var sessionIdLine = response.Headers.GetValues ("Set-Cookie").Single (l => l.IndexOf ("noip_session") == 0);
 
 			var start = sessionIdLine.IndexOf ("=");
-			var sessionId = sessionIdLine.Substring(start+1, sessionIdLine.IndexOf(";")-start);
+			var sessionId = sessionIdLine.Substring(start+1, sessionIdLine.IndexOf(";")-(start+1));
 
-			//foreach (var headerKey in response.Headers.AllKeys)
-			//	foreach (var val in response.Headers.GetValues(headerKey))
-			//		Console.WriteLine (headerKey + ":" + val);
+            var noipBidLine = response.Headers.GetValues("Set-Cookie").Single(l => l.IndexOf("NOIP_BID") == 0);
 
-			string token;
+            start = noipBidLine.IndexOf("=");
+            var noipbid = noipBidLine.Substring(start + 1, noipBidLine.IndexOf(";") - (start + 1));
+
+            string token;
 			using (var streamReader = new StreamReader (response.GetResponseStream ())) {
 				var body = streamReader.ReadToEnd ();
 
@@ -55,48 +56,74 @@ namespace noiplogin
 
 			Console.WriteLine ("SESSION_ID: " + sessionId);
 			Console.WriteLine ("TOKEN: " + token);
+            Console.WriteLine("NOIP_BID: " + noipbid);
 
-			request = (HttpWebRequest) HttpWebRequest.Create ("https://www.noip.com/login");
+			request = (HttpWebRequest) WebRequest.Create ("https://www.noip.com/login");
 
-			NameValueCollection outgoingQueryString = HttpUtility.ParseQueryString(String.Empty);
+			var outgoingQueryString = HttpUtility.ParseQueryString(String.Empty);
 			outgoingQueryString.Add("username",username);
 			outgoingQueryString.Add("password", password);
 			outgoingQueryString.Add("submit_login_page", "1");
 			outgoingQueryString.Add("_token", token);
 			outgoingQueryString.Add("Login","");
 
-			string postdata = outgoingQueryString.ToString();
+			var postdata = outgoingQueryString.ToString();
 
-			ASCIIEncoding ascii = new ASCIIEncoding();
-			byte[] postBytes = ascii.GetBytes(postdata.ToString());
+			var ascii = new ASCIIEncoding();
+			_postBytes = ascii.GetBytes(postdata);
 
 			request.Method = "POST";
 			request.ContentType = "application/x-www-form-urlencoded";
-			request.ContentLength = postBytes.Length;
 			request.UserAgent = "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; .NET CLR 1.1.4322; .NET CLR 2.0.50727)";
 
-			Stream postStream = request.GetRequestStream();
-			postStream.Write(postBytes, 0, postBytes.Length);
-			postStream.Flush();
-			postStream.Close();
+            var target = new Uri("https://www.noip.com/");
 
-			request.CookieContainer = new CookieContainer ();
-			request.CookieContainer.Add (new Cookie ("noip_session", sessionId, "/", "noip.com"));
+            request.CookieContainer = new CookieContainer();
+            request.CookieContainer.Add(new Cookie("noip_session", sessionId, "/") { Domain = target.Host });
+            request.CookieContainer.Add(new Cookie("NOIP_BID", noipbid, "/") { Domain = target.Host });
 
-			response = (HttpWebResponse)request.GetResponse ();
+            request.BeginGetRequestStream(GetRequestStreamCallback, request);
 
-			if (response.StatusCode == HttpStatusCode.OK)
-				Console.WriteLine ("LOGIN SUCCESSFUL");
-			else
-				Console.WriteLine ("ERROR: " + response.StatusCode);
+            AllDone.WaitOne();
 
-			using (var streamReader = new StreamReader (response.GetResponseStream ())) {
-				Console.WriteLine(streamReader.ReadToEnd());
-			}
+            //TODO: confirm successful login and set exit code accordingly
+            //      //   var streamResponse = _response.GetResponseStream();
 
-			Console.ReadLine ();
+            //         if (_response.StatusCode == HttpStatusCode.OK && response.ResponseUri.AbsoluteUri.IndexOf("members")>-1)
+            //	Console.WriteLine ("LOGIN SUCCESSFUL");
+            //else
+            //	Console.WriteLine ("ERROR: " + response.StatusCode);
+
+            //       //  streamResponse.Close();
+            //         _response.Close();
+
+#if DEBUG
+            Console.ReadLine ();
+#endif
 		}
-	}
-}
 
-//NOIP_BID=54a42efb169eb4.76551720; REF_CODE=http%3A%2F%2Fwww.noip.com%2Fsign-in; NOIP_SID=20.20.11254a6ba881efe97.59003818; cookie_email=mylesmcdonnell; _gat=1; _gat_UA-31174-1=1; noip_session=d0b8cb8cb57539289f2dc5f45af6e07de931b132; _ga=GA1.2.910282303.1420046076
+        private static readonly ManualResetEvent AllDone = new ManualResetEvent(false);
+	    private static HttpWebResponse _response;
+	    private static byte[] _postBytes;
+
+	    private static void GetRequestStreamCallback(IAsyncResult asynchronousResult)
+        {
+            var request = (HttpWebRequest)asynchronousResult.AsyncState;
+            var postStream = request.EndGetRequestStream(asynchronousResult);
+
+            postStream.Write(_postBytes, 0, _postBytes.Length);
+            postStream.Flush();
+            postStream.Close();
+
+            request.BeginGetResponse(GetResponseCallback, request);
+        }
+
+        private static void GetResponseCallback(IAsyncResult asynchronousResult)
+        {
+            var request = (HttpWebRequest)asynchronousResult.AsyncState;
+            _response = (HttpWebResponse)request.EndGetResponse(asynchronousResult);
+            
+            AllDone.Set();
+        }
+    }
+}
